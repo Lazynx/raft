@@ -71,7 +71,6 @@ async def put_data(request: Request, node=Depends(get_node)) -> dict[str, Any]:
         async with node._lock:
             return {"data": dict(node.data), "committed": True}
 
-    # Proxy to leader
     if leader_url is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -103,5 +102,3 @@ async def append_entries(
     node=Depends(get_node),
 ) -> AppendEntriesResponse:
     return await node.handle_append_entries(req)
-
-

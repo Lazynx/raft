@@ -23,34 +23,24 @@ class RaftNode:
         self.peer_urls: list[str] = settings.peer_urls
         self.settings: Settings = settings
 
-        # Persistent state
         self.current_term: int = 0
         self.voted_for: str | None = None
         self.log: list[LogEntry] = []
 
-        # Volatile state
         self.commit_index: int = -1
         self.last_applied: int = -1
         self.state: NodeState = NodeState.FOLLOWER
         self.current_leader: str | None = None
-        self.current_leader_url: str | None = None  # reachable URL of current leader
+        self.current_leader_url: str | None = None
 
-        # Leader-only volatile state (re-initialized on winning election)
-        # Keys are peer URLs (unique even when multiple peers share a hostname)
         self.next_index: dict[str, int] = {}
         self.match_index: dict[str, int] = {}
 
-        # State machine
         self.data: dict[str, Any] = {}
 
-        # Concurrency
         self._lock: asyncio.Lock = asyncio.Lock()
         self._election_reset_event: asyncio.Event = asyncio.Event()
         self._background_task: asyncio.Task | None = None
-
-    # ------------------------------------------------------------------ #
-    # Lifecycle                                                            #
-    # ------------------------------------------------------------------ #
 
     async def start(self) -> None:
         self._background_task = asyncio.create_task(self._run_loop())
@@ -81,7 +71,7 @@ class RaftNode:
                 )
                 try:
                     await asyncio.wait_for(self._wait_for_reset(), timeout=timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     await self._start_election()
 
     async def _wait_for_reset(self) -> None:
@@ -90,10 +80,6 @@ class RaftNode:
 
     def _reset_election_timer(self) -> None:
         self._election_reset_event.set()
-
-    # ------------------------------------------------------------------ #
-    # Election                                                             #
-    # ------------------------------------------------------------------ #
 
     async def _start_election(self) -> None:
         async with self._lock:
@@ -150,10 +136,6 @@ class RaftNode:
         self.voted_for = None
         self._reset_election_timer()
 
-    # ------------------------------------------------------------------ #
-    # RequestVote RPC                                                      #
-    # ------------------------------------------------------------------ #
-
     async def handle_request_vote(self, req: RequestVoteRequest) -> RequestVoteResponse:
         async with self._lock:
             if req.term > self.current_term:
@@ -175,28 +157,20 @@ class RaftNode:
 
             return RequestVoteResponse(term=self.current_term, vote_granted=vote_granted)
 
-    # ------------------------------------------------------------------ #
-    # AppendEntries RPC                                                    #
-    # ------------------------------------------------------------------ #
-
     async def handle_append_entries(self, req: AppendEntriesRequest) -> AppendEntriesResponse:
         async with self._lock:
             if req.term > self.current_term:
                 self._step_down(req.term)
 
             if req.term < self.current_term:
-                return AppendEntriesResponse(
-                    term=self.current_term, success=False, match_index=-1
-                )
+                return AppendEntriesResponse(term=self.current_term, success=False, match_index=-1)
 
-            # Valid leader contact
             self.state = NodeState.FOLLOWER
             self.current_leader = req.leader_id
             if req.leader_addr:
                 self.current_leader_url = req.leader_addr
             self._reset_election_timer()
 
-            # Log consistency check at prevLogIndex
             if req.prev_log_index >= 0:
                 if len(self.log) <= req.prev_log_index:
                     return AppendEntriesResponse(
@@ -212,7 +186,6 @@ class RaftNode:
                         match_index=req.prev_log_index - 1,
                     )
 
-            # Merge entries into log
             insert_at = req.prev_log_index + 1
             for i, entry in enumerate(req.entries):
                 idx = insert_at + i
@@ -223,7 +196,6 @@ class RaftNode:
                 else:
                     self.log.append(entry)
 
-            # Advance commit index
             if req.leader_commit > self.commit_index:
                 self.commit_index = min(req.leader_commit, len(self.log) - 1)
 
@@ -235,18 +207,10 @@ class RaftNode:
                 match_index=len(self.log) - 1,
             )
 
-    # ------------------------------------------------------------------ #
-    # State machine                                                        #
-    # ------------------------------------------------------------------ #
-
     def _apply_committed(self) -> None:
         while self.last_applied < self.commit_index:
             self.last_applied += 1
             self.data.update(self.log[self.last_applied].command)
-
-    # ------------------------------------------------------------------ #
-    # Leader replication                                                   #
-    # ------------------------------------------------------------------ #
 
     async def _send_heartbeats(self) -> None:
         async with self._lock:
@@ -272,9 +236,7 @@ class RaftNode:
             next_idx = self.next_index.get(url, len(self.log))
             prev_log_index = next_idx - 1
             prev_log_term = (
-                self.log[prev_log_index].term
-                if 0 <= prev_log_index < len(self.log)
-                else 0
+                self.log[prev_log_index].term if 0 <= prev_log_index < len(self.log) else 0
             )
             entries = list(self.log[next_idx:])
 
@@ -317,10 +279,6 @@ class RaftNode:
                 self._apply_committed()
                 break
 
-    # ------------------------------------------------------------------ #
-    # Client write                                                         #
-    # ------------------------------------------------------------------ #
-
     async def append_command(self, command: dict[str, Any]) -> bool:
         async with self._lock:
             if self.state != NodeState.LEADER:
@@ -342,10 +300,6 @@ class RaftNode:
             await asyncio.sleep(0.01)
 
         raise TimeoutError(f"Entry {new_index} not committed within deadline")
-
-    # ------------------------------------------------------------------ #
-    # Helpers                                                              #
-    # ------------------------------------------------------------------ #
 
     @property
     def _http(self) -> "HttpClient":

@@ -1,5 +1,3 @@
-import pytest
-
 from src.raft.models import LogEntry
 from src.raft.node import RaftNode
 

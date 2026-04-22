@@ -1,5 +1,3 @@
-import pytest
-
 from src.raft.enums import NodeState
 from src.raft.models import AppendEntriesRequest, LogEntry
 from src.raft.node import RaftNode

@@ -2,12 +2,13 @@
 Integration tests: spawns 5 real uvicorn processes on ports 8001-8005.
 Requires the project to be installed (uv sync --all-extras).
 """
+
 import asyncio
 import os
 import subprocess
 import sys
 import time
-from typing import Generator
+from collections.abc import Generator
 
 import httpx
 import pytest
@@ -90,9 +91,7 @@ def _wait_all_healthy(urls: list[str], timeout_s: float = 15.0) -> None:
     raise RuntimeError(f"Only {ready}/{len(urls)} nodes became healthy within {timeout_s}s")
 
 
-async def wait_for_single_leader(
-    urls: list[str], timeout_s: float = 5.0
-) -> str:
+async def wait_for_single_leader(urls: list[str], timeout_s: float = 5.0) -> str:
     """Poll /status until exactly one node reports state=leader. Returns leader node_id."""
     deadline = time.monotonic() + timeout_s
     async with httpx.AsyncClient() as client:
@@ -131,9 +130,7 @@ async def put_data(url: str, body: dict) -> dict | None:
         return None
 
 
-async def wait_for_data(
-    urls: list[str], key: str, value, timeout_s: float = 3.0
-) -> bool:
+async def wait_for_data(urls: list[str], key: str, value, timeout_s: float = 3.0) -> bool:
     """Wait until ALL given urls report data[key] == value."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
