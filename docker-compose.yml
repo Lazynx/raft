@@ -1,0 +1,50 @@
+services:
+  node1:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      RAFT_NODE_ID: node1
+      RAFT_SELF_URL: "http://node1:8000"
+      RAFT_PEERS: "http://node2:8000,http://node3:8000,http://node4:8000,http://node5:8000"
+    restart: unless-stopped
+
+  node2:
+    build: .
+    ports:
+      - "8002:8000"
+    environment:
+      RAFT_NODE_ID: node2
+      RAFT_SELF_URL: "http://node2:8000"
+      RAFT_PEERS: "http://node1:8000,http://node3:8000,http://node4:8000,http://node5:8000"
+    restart: unless-stopped
+
+  node3:
+    build: .
+    ports:
+      - "8003:8000"
+    environment:
+      RAFT_NODE_ID: node3
+      RAFT_SELF_URL: "http://node3:8000"
+      RAFT_PEERS: "http://node1:8000,http://node2:8000,http://node4:8000,http://node5:8000"
+    restart: unless-stopped
+
+  node4:
+    build: .
+    ports:
+      - "8004:8000"
+    environment:
+      RAFT_NODE_ID: node4
+      RAFT_SELF_URL: "http://node4:8000"
+      RAFT_PEERS: "http://node1:8000,http://node2:8000,http://node3:8000,http://node5:8000"
+    restart: unless-stopped
+
+  node5:
+    build: .
+    ports:
+      - "8005:8000"
+    environment:
+      RAFT_NODE_ID: node5
+      RAFT_SELF_URL: "http://node5:8000"
+      RAFT_PEERS: "http://node1:8000,http://node2:8000,http://node3:8000,http://node4:8000"
+    restart: unless-stopped
