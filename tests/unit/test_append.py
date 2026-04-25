@@ -101,7 +101,7 @@ async def test_advance_commit_applies_data(node: RaftNode):
 
 async def test_updates_term_on_higher_term(node: RaftNode):
     node.current_term = 1
-    resp = await node.handle_append_entries(_heartbeat(term=5))
+    await node.handle_append_entries(_heartbeat(term=5))
     assert node.current_term == 5
 
 

@@ -1,29 +1,24 @@
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
+import asyncio
+import threading
+from http.server import ThreadingHTTPServer
 
 from src.raft.config import settings
 from src.raft.node import RaftNode
-from src.raft.router import router
+from src.raft.router import make_handler
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def main() -> None:
     node = RaftNode(settings)
-    app.state.raft_node = node
+    loop = asyncio.get_event_loop()
     await node.start()
+
+    handler_class = make_handler(node, loop)
+    server = ThreadingHTTPServer((settings.host, settings.port), handler_class)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
     try:
-        yield
+        await asyncio.Event().wait()
     finally:
+        server.shutdown()
         await node.stop()
-
-
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title="Raft Node",
-        description="Raft distributed consensus — single node instance",
-        version="0.1.0",
-        lifespan=lifespan,
-    )
-    app.include_router(router)
-    return app

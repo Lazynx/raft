@@ -1,10 +1,10 @@
 .PHONY: install run lint format test test-unit test-integration docker-build up down
 
 install:
-	uv sync --all-extras
+	uv sync
 
 run:
-	uv run uvicorn src.raft.app:create_app --factory --host 0.0.0.0 --port 8000 --reload
+	uv run python -m src.raft
 
 lint:
 	uv run ruff check src tests

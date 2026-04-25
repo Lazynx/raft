@@ -1,16 +1,13 @@
-"""
-Integration tests: spawns 5 real uvicorn processes on ports 8001-8005.
-Requires the project to be installed (uv sync --all-extras).
-"""
-
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 from collections.abc import Generator
 
-import httpx
 import pytest
 
 PORTS = {f"node{i}": 8000 + i for i in range(1, 6)}
@@ -26,6 +23,8 @@ def _make_env(node_id: str) -> dict[str, str]:
         "RAFT_NODE_ID": node_id,
         "RAFT_SELF_URL": f"http://localhost:{port}",
         "RAFT_PEERS": peers,
+        "RAFT_PORT": str(port),
+        "RAFT_HOST": "0.0.0.0",
         "RAFT_ELECTION_TIMEOUT_MIN_MS": "150",
         "RAFT_ELECTION_TIMEOUT_MAX_MS": "300",
         "RAFT_HEARTBEAT_INTERVAL_MS": "50",
@@ -34,21 +33,8 @@ def _make_env(node_id: str) -> dict[str, str]:
 
 
 def _start_node(node_id: str) -> subprocess.Popen:
-    port = PORTS[node_id]
     return subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "src.raft.app:create_app",
-            "--factory",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(port),
-            "--log-level",
-            "warning",
-        ],
+        [sys.executable, "-m", "src.raft"],
         env=_make_env(node_id),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -76,13 +62,14 @@ def cluster() -> Generator[dict[str, subprocess.Popen], None, None]:
 
 def _wait_all_healthy(urls: list[str], timeout_s: float = 15.0) -> None:
     deadline = time.monotonic() + timeout_s
+    ready = 0
     while time.monotonic() < deadline:
         ready = 0
         for url in urls:
             try:
-                r = httpx.get(f"{url}/health", timeout=0.5)
-                if r.status_code == 200:
-                    ready += 1
+                with urllib.request.urlopen(f"{url}/health", timeout=0.5) as r:
+                    if r.status == 200:
+                        ready += 1
             except Exception:
                 pass
         if ready == len(urls):
@@ -91,47 +78,86 @@ def _wait_all_healthy(urls: list[str], timeout_s: float = 15.0) -> None:
     raise RuntimeError(f"Only {ready}/{len(urls)} nodes became healthy within {timeout_s}s")
 
 
+async def _async_request(
+    method: str, url: str, body: dict | None, timeout: float
+) -> tuple[int, dict]:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    path = parsed.path or "/"
+    payload = json.dumps(body).encode() if body is not None else b""
+    request_lines = [
+        f"{method} {path} HTTP/1.1",
+        f"Host: {host}:{port}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(payload)}",
+        "Connection: close",
+        "",
+        "",
+    ]
+    request_bytes = "\r\n".join(request_lines).encode() + payload
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    try:
+        writer.write(request_bytes)
+        await writer.drain()
+        status_line = await reader.readline()
+        status_code = int(status_line.decode().split()[1])
+        resp_headers: dict[str, str] = {}
+        while True:
+            line = await reader.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            key, _, val = line.decode().partition(":")
+            resp_headers[key.lower().strip()] = val.strip()
+        content_length = int(resp_headers.get("content-length", "0"))
+        body_bytes = await reader.readexactly(content_length) if content_length > 0 else b""
+    finally:
+        writer.close()
+    return status_code, json.loads(body_bytes) if body_bytes else {}
+
+
+async def _async_get(url: str, timeout: float = 1.0) -> tuple[int, dict]:
+    return await _async_request("GET", url, None, timeout)
+
+
+async def _async_put(url: str, body: dict, timeout: float = 5.0) -> tuple[int, dict]:
+    return await _async_request("PUT", url, body, timeout)
+
+
 async def wait_for_single_leader(urls: list[str], timeout_s: float = 5.0) -> str:
-    """Poll /status until exactly one node reports state=leader. Returns leader node_id."""
     deadline = time.monotonic() + timeout_s
-    async with httpx.AsyncClient() as client:
-        while time.monotonic() < deadline:
-            leaders: list[str] = []
-            for url in urls:
-                try:
-                    r = await client.get(f"{url}/status", timeout=0.5)
-                    if r.status_code == 200:
-                        s = r.json()
-                        if s["state"] == "leader":
-                            leaders.append(s["node_id"])
-                except Exception:
-                    pass
-            if len(leaders) == 1:
-                return leaders[0]
-            await asyncio.sleep(0.1)
+    while time.monotonic() < deadline:
+        leaders: list[str] = []
+        for url in urls:
+            try:
+                status, body = await _async_get(f"{url}/status", timeout=0.5)
+                if status == 200 and body.get("state") == "leader":
+                    leaders.append(body["node_id"])
+            except Exception:
+                pass
+        if len(leaders) == 1:
+            return leaders[0]
+        await asyncio.sleep(0.1)
     raise TimeoutError(f"No single leader elected within {timeout_s}s")
 
 
 async def get_data(url: str) -> dict | None:
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{url}/data", timeout=1.0)
-            return r.json() if r.status_code == 200 else None
+        status, body = await _async_get(f"{url}/data", timeout=1.0)
+        return body if status == 200 else None
     except Exception:
         return None
 
 
 async def put_data(url: str, body: dict) -> dict | None:
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.put(f"{url}/data", json=body, timeout=5.0)
-            return r.json() if r.status_code == 200 else None
+        status, resp = await _async_put(f"{url}/data", body, timeout=5.0)
+        return resp if status == 200 else None
     except Exception:
         return None
 
 
 async def wait_for_data(urls: list[str], key: str, value, timeout_s: float = 3.0) -> bool:
-    """Wait until ALL given urls report data[key] == value."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         found = 0
@@ -146,16 +172,10 @@ async def wait_for_data(urls: list[str], key: str, value, timeout_s: float = 3.0
 
 
 def _ensure_cluster_healthy(cluster: dict[str, subprocess.Popen]) -> None:
-    """Ensure all nodes are running; restart any that died."""
     for node_id, proc in cluster.items():
         if proc.poll() is not None:
             cluster[node_id] = _start_node(node_id)
     _wait_all_healthy(ALL_URLS, timeout_s=10.0)
-
-
-# ------------------------------------------------------------------ #
-# Tests                                                               #
-# ------------------------------------------------------------------ #
 
 
 async def test_single_leader_elected(cluster):
@@ -165,18 +185,17 @@ async def test_single_leader_elected(cluster):
 
 
 async def test_only_one_leader_at_a_time(cluster):
-    async with httpx.AsyncClient() as client:
-        for _ in range(10):
-            leaders = []
-            for url in ALL_URLS:
-                try:
-                    r = await client.get(f"{url}/status", timeout=0.5)
-                    if r.status_code == 200 and r.json()["state"] == "leader":
-                        leaders.append(r.json()["node_id"])
-                except Exception:
-                    pass
-            assert len(leaders) <= 1, f"Multiple leaders: {leaders}"
-            await asyncio.sleep(0.1)
+    for _ in range(10):
+        leaders = []
+        for url in ALL_URLS:
+            try:
+                status, body = await _async_get(f"{url}/status", timeout=0.5)
+                if status == 200 and body["state"] == "leader":
+                    leaders.append(body["node_id"])
+            except Exception:
+                pass
+        assert len(leaders) <= 1, f"Multiple leaders: {leaders}"
+        await asyncio.sleep(0.1)
 
 
 async def test_write_to_leader_replicated_to_all(cluster):
@@ -228,14 +247,12 @@ async def test_kill_leader_new_leader_elected(cluster):
     new_leader = await wait_for_single_leader(surviving_urls, timeout_s=5.0)
     assert new_leader != leader_id
 
-    # Restart killed node so subsequent tests have a full cluster
     cluster[leader_id] = _start_node(leader_id)
     _wait_all_healthy([BASE_URLS[leader_id]], timeout_s=8.0)
     await asyncio.sleep(0.5)
 
 
 async def test_write_read_after_failover(cluster):
-    # Ensure full cluster first
     _ensure_cluster_healthy(cluster)
     leader_id = await wait_for_single_leader(ALL_URLS, timeout_s=5.0)
 
@@ -252,22 +269,15 @@ async def test_write_read_after_failover(cluster):
     ok = await wait_for_data(surviving_urls, "failover_key", "ok")
     assert ok, "Data not replicated after failover"
 
-    # Restart killed node
     cluster[leader_id] = _start_node(leader_id)
     _wait_all_healthy([BASE_URLS[leader_id]], timeout_s=8.0)
     await asyncio.sleep(0.5)
 
 
 async def test_minority_cannot_commit(cluster):
-    """
-    With only 2 of 5 nodes alive (minority), the cluster cannot commit new writes.
-    A surviving leader may still exist (Raft doesn't force step-down without higher term),
-    but any write to it should timeout since it can't reach majority to commit.
-    """
     _ensure_cluster_healthy(cluster)
     await wait_for_single_leader(ALL_URLS, timeout_s=5.0)
 
-    # Kill 3 nodes (majority) — only 2 survive
     killed = list(PORTS.keys())[:3]
     for nid in killed:
         cluster[nid].kill()
@@ -275,7 +285,6 @@ async def test_minority_cannot_commit(cluster):
 
     surviving_urls = [BASE_URLS[nid] for nid in PORTS if nid not in killed]
 
-    # Try to write to either surviving node; the cluster can't commit (no majority)
     write_succeeded = False
     for url in surviving_urls:
         result = await put_data(url, {"minority_write": True})
@@ -285,7 +294,6 @@ async def test_minority_cannot_commit(cluster):
 
     assert not write_succeeded, "Minority cluster should not be able to commit writes"
 
-    # Restart killed nodes
     for nid in killed:
         cluster[nid] = _start_node(nid)
     _wait_all_healthy([BASE_URLS[nid] for nid in killed], timeout_s=10.0)
@@ -296,22 +304,18 @@ async def test_rejoin_node_catches_up(cluster):
     _ensure_cluster_healthy(cluster)
     leader_id = await wait_for_single_leader(ALL_URLS, timeout_s=5.0)
 
-    # Kill a follower specifically
     follower_id = next(nid for nid in PORTS if nid != leader_id)
     cluster[follower_id].kill()
     cluster[follower_id].wait(timeout=3)
 
-    # Write 5 entries while follower is down
     leader_url = BASE_URLS[leader_id]
     for i in range(5):
         r = await put_data(leader_url, {f"catchup_{i}": i})
         assert r is not None, f"Write {i} failed during follower downtime"
 
-    # Restart follower
     cluster[follower_id] = _start_node(follower_id)
     _wait_all_healthy([BASE_URLS[follower_id]], timeout_s=8.0)
 
-    # Allow catch-up via heartbeats
     await asyncio.sleep(1.5)
 
     data = await get_data(BASE_URLS[follower_id])
